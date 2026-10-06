@@ -1,6 +1,6 @@
 # Rolling out to retailinmotion.atlassian.net
 
-The work site runs the internal edition from its own Forge environment, `work-site`.
+The work site runs this app from the Forge `production` environment.
 Merges to `main` keep going to the sandbox only; the work site changes only when the
 **Deploy to Retail in Motion work site** workflow is run (Actions → that workflow → Run,
 type `DEPLOY`).
