@@ -1,0 +1,190 @@
+name: Asset Manager CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+# A newer push to the same PR cancels its in-flight run. Runs on main queue instead of
+# cancelling, so deploys never overlap ("Environment is blocked by other deployment").
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
+      FORGE_API_TOKEN: ${{ secrets.FORGE_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install backend dependencies
+        run: npm install --ignore-scripts
+      - name: Install Asset Manager UI dependencies
+        run: npm --prefix static install
+      - name: Install Device field UI dependencies
+        run: npm --prefix field-static install
+      - name: Install Issue panel UI dependencies
+        run: npm --prefix panel-static install
+      - name: Install Device split UI dependencies
+        run: npm --prefix split-static install
+      - name: Install Customer portal UI dependencies
+        run: npm --prefix portal-static install
+      - name: Install Internal Asset Operations UI dependencies
+        run: npm --prefix crew-static install
+      - name: Install Forge CLI
+        run: npm install --global @forge/cli@latest
+      - name: Disable Forge usage analytics
+        run: forge settings set usage-analytics false
+      - name: Verify Retail inMotion branding
+        run: npm run verify:branding
+      - name: Check resolver syntax
+        run: |
+          node --check src/index.js
+          node --check src/ticket-sync.js
+          node --check src/issue-panel.js
+          node --check src/device-split.js
+          node --check src/portal-assets.js
+          node --check src/crew.js
+      - name: Run import validation tests
+        run: npm --prefix static test
+      - name: Run QA regression simulations
+        run: npm run qa:test
+      - name: Run internal-edition UI tests
+        run: npm run qa:internal
+      - name: Build Asset Manager UI
+        run: npm --prefix static run build
+      - name: Build Device field UI
+        run: npm --prefix field-static run build
+      - name: Build Issue panel UI
+        run: npm --prefix panel-static run build
+      - name: Build Device split UI
+        run: npm --prefix split-static run build
+      - name: Build Customer portal UI
+        run: npm --prefix portal-static run build
+      - name: Build Internal Asset Operations UI
+        run: npm --prefix crew-static run build
+      - name: Forge lint
+        shell: bash
+        run: |
+          set +e
+          output=$(forge lint 2>&1)
+          status=$?
+          set -e
+          echo "$output"
+          if [ "$status" -eq 0 ]; then exit 0; fi
+          if echo "$output" | grep -q "0 errors, 0 warnings, 1 approval" && echo "$output" | grep -q "MAJOR_VERSION_RULE"; then
+            echo "Forge lint only requires approval for the intentional scope/module major version change; continuing CI."
+            exit 0
+          fi
+          exit "$status"
+      - name: Keep built UIs for deployment
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          retention-days: 1
+          path: |
+            static/dist
+            field-static/dist
+            panel-static/dist
+            split-static/dist
+            portal-static/dist
+            crew-static/dist
+
+  deploy-sandbox:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: retailinmotion-sandbox1
+    env:
+      FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
+      FORGE_API_TOKEN: ${{ secrets.FORGE_API_TOKEN }}
+      FORGE_SITE: retailinmotion-sandbox1.atlassian.net
+      FORGE_ENVIRONMENT: development
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install backend dependencies
+        run: npm install --ignore-scripts
+      - name: Download UI builds from validate
+        uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+      - name: Verify Retail inMotion branding and Forge app id
+        run: node scripts/verify-branding.mjs --deploy
+      - name: Install Forge CLI
+        run: npm install --global @forge/cli@latest
+      - name: Disable Forge usage analytics
+        run: forge settings set usage-analytics false
+      - name: Deploy to Forge development
+        run: forge deploy --environment "$FORGE_ENVIRONMENT" --approve MAJOR_VERSION_RULE --non-interactive
+      - name: Install or upgrade on Retail in Motion sandbox
+        shell: bash
+        run: |
+          if forge install --upgrade all --site "$FORGE_SITE" --product jira --environment "$FORGE_ENVIRONMENT" --confirm-scopes --non-interactive; then
+            echo "Existing sandbox installation upgraded successfully."
+          else
+            echo "No upgradeable installation found; attempting first install."
+            forge install --site "$FORGE_SITE" --product jira --environment "$FORGE_ENVIRONMENT" --confirm-scopes --non-interactive
+          fi
+      - name: Post-deploy Jira smoke tests
+        run: node qa/live-jira-smoke.mjs
+
+  browser-e2e-sandbox:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    needs: deploy-sandbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: retailinmotion-sandbox1
+    env:
+      # Asset Manager page on the sandbox, set as a repository variable: .../jira/apps/<app id>/<environment id>
+      ASSET_MANAGER_E2E_URL: ${{ vars.ASSET_MANAGER_E2E_URL }}
+      PLAYWRIGHT_STORAGE_STATE_B64: ${{ secrets.PLAYWRIGHT_STORAGE_STATE_B64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Browser QA configuration notice
+        if: env.PLAYWRIGHT_STORAGE_STATE_B64 == ''
+        run: echo "::warning::Authenticated browser QA is ready but PLAYWRIGHT_STORAGE_STATE_B64 is not configured yet."
+      - name: Install browser QA dependencies
+        if: env.PLAYWRIGHT_STORAGE_STATE_B64 != ''
+        run: npm install --ignore-scripts
+      - name: Install Chromium
+        if: env.PLAYWRIGHT_STORAGE_STATE_B64 != ''
+        run: npx playwright install --with-deps chromium
+      - name: Restore Atlassian browser session
+        if: env.PLAYWRIGHT_STORAGE_STATE_B64 != ''
+        run: node qa/write-playwright-state.mjs
+      - name: Run sandbox browser acceptance
+        if: env.PLAYWRIGHT_STORAGE_STATE_B64 != ''
+        run: npm run qa:browser
+      - name: Upload browser failure evidence
+        if: failure() && env.PLAYWRIGHT_STORAGE_STATE_B64 != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-manager-browser-e2e
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: ignore

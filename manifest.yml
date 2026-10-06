@@ -1,0 +1,163 @@
+modules:
+  jira:globalPage:
+    - key: retailinmotion-asset-manager
+      resource: main
+      resolver:
+        function: resolver
+      title: Asset Manager
+      layout: blank
+      pages:
+        - title: Overview
+          route: overview
+        - title: Reports
+          route: reports
+
+  jira:adminPage:
+    - key: retailinmotion-internal-asset-operations
+      resource: crew-tracking
+      resolver:
+        function: crew-tracking
+      title: Internal Asset Operations
+      layout: blank
+      pages:
+        - title: Crew Tracking
+          route: crew-tracking
+        - title: Device Usage Reconciliation
+          route: device-usage
+        - title: SOTI Sync
+          route: soti
+
+  jira:issuePanel:
+    - key: retailinmotion-asset-issue-panel
+      resource: issue-panel
+      resolver:
+        function: issue-panel
+      title: Device / Asset
+      icon: https://developer.atlassian.com/platform/forge/images/icons/issue-panel-icon.svg
+
+  jira:issueAction:
+    - key: retailinmotion-split-devices
+      resource: split-action
+      resolver:
+        function: device-split
+      title: Split Devices
+      viewportSize: medium
+
+  jira:customField:
+    - key: retailinmotion-device-field
+      name: Device
+      description: Select a device from Retail inMotion Asset Manager.
+      type: object
+      resolver:
+        function: ticket-sync
+      schema:
+        type: object
+        properties:
+          id:
+            type: string
+            searchAlias: AssetId
+          name:
+            type: string
+            searchAlias: DeviceName
+        required:
+          - id
+          - name
+        additionalProperties: false
+      view:
+        formatter:
+          expression: "value != null ? value.name : ''"
+          export: true
+      edit:
+        resource: device-field
+        experience:
+          - issue-view
+          - issue-create
+          - issue-transition
+
+  jiraServiceManagement:portalUserMenuAction:
+    - key: retailinmotion-my-organisation-devices
+      resource: portal-assets
+      resolver:
+        function: portal-assets
+      title: My organisation's devices
+      viewportSize: large
+      unlicensedAccess:
+        - customer
+        - unlicensed
+
+  trigger:
+    - key: ticket-status-device-sync
+      function: status-sync
+      events:
+        - avi:jira:created:issue
+        - avi:jira:updated:issue
+      filter:
+        ignoreSelf: true
+
+  scheduledTrigger:
+    - key: portal-plus-snapshot
+      function: portal-plus-refresh
+      interval: hour
+    - key: soti-device-sync
+      function: soti-sync
+      interval: hour
+
+  function:
+    - key: resolver
+      handler: index.handler
+    - key: soti-sync
+      handler: soti.scheduled
+    - key: ticket-sync
+      handler: ticket-sync.handler
+    - key: issue-panel
+      handler: issue-panel.handler
+    - key: device-split
+      handler: device-split.handler
+    - key: portal-assets
+      handler: portal-assets.handler
+    - key: crew-tracking
+      handler: crew.handler
+    - key: portal-plus-refresh
+      handler: portal-plus-refresh.handler
+    - key: status-sync
+      handler: status-sync.handler
+
+resources:
+  - key: main
+    path: static/dist
+  - key: issue-panel
+    path: panel-static/dist
+  - key: split-action
+    path: split-static/dist
+  - key: device-field
+    path: field-static/dist
+  - key: portal-assets
+    path: portal-static/dist
+  - key: crew-tracking
+    path: crew-static/dist
+
+permissions:
+  scopes:
+    - storage:app
+    - read:jira-work
+    - write:jira-work
+    - manage:jira-project
+    - read:jira-user
+    - read:user:jira
+    - read:avatar:jira
+    - read:application-role:jira
+    - read:group:jira
+    - read:organization:jira-service-management
+  # Read-only SOTI MobiControl sync (SOTI ONE, SOTI-hosted servers only).
+  external:
+    fetch:
+      backend:
+        - address: '*.mobicontrol.cloud'
+        - address: '*.mobicontrolcloud.com'
+
+app:
+  runtime:
+    name: nodejs22.x
+  # Retail inMotion has its own Forge app, separate from the Marketplace app.
+  # Replace with the id printed by: forge register "Retail inMotion Asset Manager"
+  id: ari:cloud:ecosystem::app/REPLACE-WITH-RETAIL-INMOTION-APP-ID

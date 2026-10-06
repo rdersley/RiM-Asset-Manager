@@ -1,0 +1,163 @@
+import Resolver from '@forge/resolver';
+import { licensedResolver } from './licence.js';
+import api, { route } from '@forge/api';
+import { kvs } from '@forge/kvs';
+import { createHash } from 'node:crypto';
+import { buildPortalPlusAssetModule } from './portal-plus-provider.js';
+
+const resolver = licensedResolver(new Resolver());
+const SETTINGS_KEY = 'settings:asset-manager';
+const ASSET_PREFIX = 'asset:';
+const ASSET_NAME_PREFIX = 'asset-name:';
+
+const clean = (value) => (typeof value === 'string' ? value.trim() : value);
+const safeArray = (value) => Array.isArray(value) ? value : [];
+const normalise = (value) => String(clean(value) || '').toLocaleLowerCase('en').replace(/\s+/g, ' ');
+const validIdentifier = (value) => {
+  const v = normalise(value);
+  return Boolean(v && !['.', '-', 'n/a', 'na', 'none', 'null', 'unknown'].includes(v));
+};
+const nameIndexKey = (name) => `${ASSET_NAME_PREFIX}${Buffer.from(normalise(name), 'utf8').toString('base64url')}`;
+const jiraAssetId = (fieldId, identifier) => `AST-JIRA-${createHash('sha256').update(`${fieldId}:${normalise(identifier)}`).digest('hex').slice(0, 24).toUpperCase()}`;
+
+function fieldValues(value) {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value.flatMap(fieldValues);
+  if (typeof value === 'string' || typeof value === 'number') return [String(value).trim()].filter(Boolean);
+  if (typeof value === 'object') {
+    const candidate = value.value ?? value.name ?? value.label ?? value.displayName ?? value.objectKey ?? value.key;
+    return candidate ? [String(candidate).trim()] : [];
+  }
+  return [];
+}
+
+async function getSettings() {
+  return (await kvs.get(SETTINGS_KEY)) || {};
+}
+
+async function getFields() {
+  const response = await api.asApp().requestJira(route`/rest/api/3/field`, { headers: { Accept: 'application/json' } });
+  if (!response.ok) throw new Error(`Could not load Jira fields (${response.status}).`);
+  return response.json();
+}
+
+function findOrganizationsField(fields) {
+  return safeArray(fields).find((field) => {
+    const name = normalise(field?.name);
+    const custom = normalise(field?.schema?.custom);
+    return name === 'organizations' || name === 'organisations' || custom.includes('organization');
+  }) || null;
+}
+
+async function currentCustomerOrganizations(context) {
+  const accountId = String(context?.accountId || '');
+  if (!accountId) return [];
+  const organisations = [];
+  let start = 0;
+  for (let guard = 0; guard < 10; guard += 1) {
+    const response = await api.asApp().requestJira(route`/rest/servicedeskapi/organization?accountId=${accountId}&start=${start}&limit=100`, { headers: { Accept: 'application/json' } });
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) return [];
+      throw new Error(`Could not load your Jira Service Management organisations (${response.status}).`);
+    }
+    const data = await response.json();
+    const values = safeArray(data.values);
+    organisations.push(...values.map((org) => ({ id: String(org.id || ''), name: clean(org.name || '') })).filter((org) => org.id && org.name));
+    if (data.isLastPage !== false || !values.length) break;
+    start += values.length;
+  }
+  return organisations;
+}
+
+function escapeJql(value) {
+  return String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+// Up to 2,000 recent tickets per organisation, within a shared time budget so the portal
+// call stays well inside the 25s Forge limit. `partial` means older devices may be missing.
+const ORGANISATION_TICKET_PAGES = 20;
+const PORTAL_TIME_BUDGET_MS = 15000;
+
+async function identifiersForOrganisation(deviceFieldId, organisationName, deadline) {
+  const numericId = String(deviceFieldId).replace('customfield_', '');
+  const jql = `cf[${numericId}] is not EMPTY AND organizations = "${escapeJql(organisationName)}" ORDER BY created DESC`;
+  const identifiers = new Map();
+  let nextPageToken;
+  for (let guard = 0; guard < ORGANISATION_TICKET_PAGES && Date.now() < deadline; guard += 1) {
+    const body = { jql, fields: [deviceFieldId], maxResults: 100 };
+    if (nextPageToken) body.nextPageToken = nextPageToken;
+    const response = await api.asApp().requestJira(route`/rest/api/3/search/jql`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`Could not load organisation devices (${response.status}).`);
+    const data = await response.json();
+    for (const issue of safeArray(data.issues)) {
+      for (const identifier of fieldValues(issue.fields?.[deviceFieldId])) {
+        if (!validIdentifier(identifier)) continue;
+        const key = normalise(identifier);
+        if (!identifiers.has(key)) identifiers.set(key, identifier);
+      }
+    }
+    nextPageToken = data.nextPageToken || null;
+    if (!nextPageToken) break;
+  }
+  return { identifiers: [...identifiers.values()], partial: Boolean(nextPageToken) };
+}
+
+async function assetForIdentifier(deviceFieldId, identifier) {
+  const deterministic = await kvs.get(`${ASSET_PREFIX}${jiraAssetId(deviceFieldId, identifier)}`);
+  if (deterministic) return deterministic;
+  const indexed = await kvs.get(nameIndexKey(identifier));
+  if (indexed?.assetId) return kvs.get(`${ASSET_PREFIX}${indexed.assetId}`);
+  return null;
+}
+
+async function portalAssetsForContext(context) {
+  const settings = await getSettings();
+  if (!settings.jiraAssetField?.id) return { organisations: [], assets: [], configured: false, reason: 'Asset Manager has not been mapped to a Jira Device ID field yet.' };
+
+  const organisations = await currentCustomerOrganizations(context);
+  if (!organisations.length) return { organisations: [], assets: [], configured: true, reason: 'Your portal account is not a member of a Jira Service Management organisation.' };
+
+  const fields = await getFields();
+  const organisationField = findOrganizationsField(fields);
+  if (!organisationField) return { organisations, assets: [], configured: true, reason: 'The Jira Service Management Organizations field could not be found.' };
+
+  const visible = new Map();
+  const deadline = Date.now() + PORTAL_TIME_BUDGET_MS;
+  let partial = false;
+  for (const organisation of organisations) {
+    if (Date.now() >= deadline) { partial = true; break; }
+    const found = await identifiersForOrganisation(settings.jiraAssetField.id, organisation.name, deadline);
+    if (found.partial) partial = true;
+    const resolved = await Promise.all(found.identifiers.map(async (identifier) => ({ identifier, asset: await assetForIdentifier(settings.jiraAssetField.id, identifier) })));
+    for (const { identifier, asset } of resolved) {
+      if (!asset) continue;
+      const existing = visible.get(asset.id);
+      const organisationNames = new Set([...(existing?.organisationNames || []), organisation.name]);
+      visible.set(asset.id, {
+        id: asset.id,
+        deviceId: asset.jiraIdentifier || asset.name || identifier,
+        name: asset.name || identifier,
+        type: asset.type || '',
+        manufacturer: asset.manufacturer || '',
+        model: asset.model || '',
+        serialNumber: asset.serialNumber || '',
+        holder: asset.assigneeName || asset.crewCode || '',
+        status: asset.status || '',
+        location: asset.location || '',
+        organisationNames: [...organisationNames]
+      });
+    }
+  }
+
+  const assets = [...visible.values()].sort((a, b) => String(a.deviceId).localeCompare(String(b.deviceId), undefined, { sensitivity: 'base' }));
+  return { organisations, assets, partial, configured: true, organisationField: { id: organisationField.id, name: organisationField.name } };
+}
+
+resolver.define('getPortalAssets', async ({ context }) => portalAssetsForContext(context));
+resolver.define('getPortalPlusModule', async ({ context }) => buildPortalPlusAssetModule(await portalAssetsForContext(context)));
+
+export const handler = resolver.getDefinitions();
