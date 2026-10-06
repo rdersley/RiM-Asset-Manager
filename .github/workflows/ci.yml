@@ -18,6 +18,8 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      registered: ${{ steps.app.outputs.registered }}
     timeout-minutes: 15
     env:
       FORGE_EMAIL: ${{ secrets.FORGE_EMAIL }}
@@ -25,6 +27,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Check the Forge app is registered
+        id: app
+        shell: bash
+        run: |
+          if grep -q 'REPLACE-WITH-RETAIL-INMOTION-APP-ID' manifest.yml; then
+            echo "registered=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::This Forge app is not registered yet, so Forge lint and the sandbox deploy are skipped. Run the Register Forge app workflow."
+          else
+            echo "registered=true" >> "$GITHUB_OUTPUT"
+          fi
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -76,6 +88,7 @@ jobs:
       - name: Build Internal Asset Operations UI
         run: npm --prefix crew-static run build
       - name: Forge lint
+        if: steps.app.outputs.registered == 'true'
         shell: bash
         run: |
           set +e
@@ -104,7 +117,7 @@ jobs:
             crew-static/dist
 
   deploy-sandbox:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    if: (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && needs.validate.outputs.registered == 'true'
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 20

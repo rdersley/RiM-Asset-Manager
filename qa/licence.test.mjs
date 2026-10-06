@@ -8,50 +8,27 @@ mock.module('@forge/api', {
   namedExports: { route: (strings, ...values) => strings.reduce((out, s, i) => out + s + (values[i] ?? ''), '') }
 });
 const { licenceState, requireActiveLicence, licensedResolver, LICENCE_INACTIVE_CODE, LICENCE_INACTIVE_MESSAGE } = await import('../src/licence.js');
-const { guardResolver } = await import('../src/auth.js');
 const ui = await import('../shared/licence.js');
 
 function fakeResolver() { const defs = {}; return { defs, define: (key, handler) => { defs[key] = handler; } }; }
 const prod = (license) => ({ environmentType: 'PRODUCTION', ...(license === undefined ? {} : { license }) });
 
-test('production requires an active licence (isActive or active)', () => {
-  assert.equal(licenceState(prod({ isActive: true })).active, true);
-  assert.equal(licenceState(prod({ active: true })).active, true);
-  assert.doesNotThrow(() => requireActiveLicence(prod({ isActive: true })));
-});
-
-test('production fails closed when the licence is missing or inactive', () => {
-  for (const context of [prod(undefined), prod(null), prod({}), prod({ isActive: false }), prod({ isActive: 'true' }), { environmentType: 'production' }]) {
-    assert.equal(licenceState(context).enforced, true);
-    assert.throws(() => requireActiveLicence(context), new RegExp(LICENCE_INACTIVE_CODE));
-  }
-});
-
-test('non-production environments are never blocked', () => {
-  for (const environmentType of ['DEVELOPMENT', 'STAGING', '', undefined]) {
-    const context = { environmentType, license: { isActive: false } };
-    assert.equal(licenceState(context).enforced, false);
-    assert.doesNotThrow(() => requireActiveLicence(context));
+test('the internal edition never blocks, in any environment or licence state', async () => {
+  for (const environmentType of ['PRODUCTION', 'production', 'DEVELOPMENT', 'STAGING', '', undefined]) {
+    for (const license of [undefined, null, {}, { isActive: false }, { isActive: true }]) {
+      const context = { environmentType, license };
+      assert.deepEqual([licenceState(context).enforced, licenceState(context).active], [false, true]);
+      assert.doesNotThrow(() => requireActiveLicence(context));
+    }
   }
   assert.doesNotThrow(() => requireActiveLicence(undefined));
-});
-
-test('licensedResolver blocks every resolver in unlicensed production and passes otherwise', async () => {
   const resolver = licensedResolver(fakeResolver());
   resolver.define('getPortalAssets', async ({ payload }) => `ok:${payload.n}`);
-  await assert.rejects(resolver.defs.getPortalAssets({ payload: { n: 1 }, context: prod({ isActive: false }) }), new RegExp(LICENCE_INACTIVE_CODE));
-  assert.equal(await resolver.defs.getPortalAssets({ payload: { n: 2 }, context: prod({ isActive: true }) }), 'ok:2');
-  assert.equal(await resolver.defs.getPortalAssets({ payload: { n: 3 }, context: { environmentType: 'DEVELOPMENT' } }), 'ok:3');
+  assert.equal(await resolver.defs.getPortalAssets({ payload: { n: 1 }, context: prod(undefined) }), 'ok:1');
 });
 
-test('licence check runs before the admin permission call, so unlicensed calls cost no Jira request', async () => {
-  const resolver = guardResolver(licensedResolver(fakeResolver()), new Set(['saveSettings']));
-  resolver.define('saveSettings', async () => 'saved');
-  requests.length = 0;
-  await assert.rejects(resolver.defs.saveSettings({ payload: {}, context: prod(undefined) }), new RegExp(LICENCE_INACTIVE_CODE));
-  assert.equal(requests.length, 0);
-  assert.equal(await resolver.defs.saveSettings({ payload: {}, context: prod({ isActive: true }) }), 'saved');
-  assert.equal(requests.length, 1);
+test('the internal manifest does not enable Marketplace licensing', () => {
+  assert.doesNotMatch(fs.readFileSync(new URL('../manifest.yml', import.meta.url), 'utf8'), /licensing:\s*\r?\n\s+enabled:\s*true/);
 });
 
 test('resolvers are all licence-wrapped', () => {
@@ -62,9 +39,7 @@ test('resolvers are all licence-wrapped', () => {
 });
 
 test('UI helper recognises the Forge-wrapped licence error and shows the friendly message', async () => {
-  let thrown;
-  try { requireActiveLicence(prod(undefined)); } catch (error) { thrown = error; }
-  const bridged = new Error(`There was an error invoking the function - ${thrown.message}`);
+  const bridged = new Error(`There was an error invoking the function - ${LICENCE_INACTIVE_MESSAGE} [${LICENCE_INACTIVE_CODE}]`);
   assert.equal(ui.LICENCE_INACTIVE_CODE, LICENCE_INACTIVE_CODE);
   assert.equal(ui.LICENCE_INACTIVE_MESSAGE, LICENCE_INACTIVE_MESSAGE);
   assert.equal(ui.isLicenceInactive(bridged), true);

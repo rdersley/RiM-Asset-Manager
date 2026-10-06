@@ -38,8 +38,11 @@ Besides the asset register, this edition includes **Internal Asset Operations** 
 
 This repository has its own Forge app. Before the first deploy:
 
-1. Run `forge register "Retail inMotion Asset Manager"` and replace the placeholder `app.id` in `manifest.yml` with the id it prints.
-2. Add the repository secrets `FORGE_EMAIL`, `FORGE_API_TOKEN` (and `PLAYWRIGHT_STORAGE_STATE_B64` for browser QA), the GitHub environment `retailinmotion-sandbox1`, and the repository variable `ASSET_MANAGER_E2E_URL` (the Asset Manager page URL on the sandbox).
+1. Add the repository secrets `FORGE_EMAIL` and `FORGE_API_TOKEN` (and `PLAYWRIGHT_STORAGE_STATE_B64` for browser QA), and the GitHub environment `retailinmotion-sandbox1`.
+2. Run Actions → **Register Forge app**. It registers this repository as its own Forge app and commits the new `app.id` to `manifest.yml`, then starts CI, which deploys to the sandbox. Until then CI skips Forge lint and the sandbox deploy.
+3. After the first sandbox deploy, set the repository variable `ASSET_MANAGER_E2E_URL` to the Asset Manager page URL on the sandbox (`https://retailinmotion-sandbox1.atlassian.net/jira/apps/<app id>/<environment id>`) to switch on browser QA.
+
+The app has no licence check: it is never listed on the Marketplace, so `src/licence.js` allows every installation.
 
 Merges to `main` deploy to the sandbox through the Forge `development` environment. The work site is deployed only by the manual **Deploy to Retail in Motion work site** workflow (see `docs/WORK_SITE_ROLLOUT.md`).
 
