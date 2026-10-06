@@ -25,13 +25,18 @@ Sandbox data does not move across; export from the sandbox and import if you nee
 
 ## Moving from the previous Asset Manager app
 
-The work site and sandbox previously ran Asset Manager under the Marketplace app's Forge app id.
-This repository is a new Forge app, so its storage starts empty and the old app's data does not
-carry over. For each site:
+The work site and sandbox previously ran Asset Manager under another Forge app. This repository is
+a new Forge app with its own storage, so data is moved with **Backup & restore** (Configuration,
+Jira admins only). Nothing is lost as long as the previous app is uninstalled only at the end.
+For each site:
 
-1. In the old app, export the asset register (Assets → Export CSV) and note the Configuration.
-2. Deploy and install this app (sandbox through CI, work site through the manual workflow).
-3. Configure it as above, run the Jira scan, then import the exported CSV.
-4. Uninstall the old app from the site (`forge uninstall` from the Marketplace repository, or
-   Manage apps), so only the Retail inMotion app remains. Its Device custom field goes with it;
-   this app adds its own Device field, filled again by the Jira scan.
+1. In the previous app: Configuration → **Download backup**. This saves every setting and record
+   (assets, history, issue links, crew register, SOTI settings, …) in one file. The SOTI password
+   is never included.
+2. Deploy and install this app (sandbox through CI, work site through the manual workflow). Both
+   apps can be installed side by side.
+3. In this app: Configuration → **Restore** → choose the file → **Restore this backup**.
+4. Still in Backup & restore: **Copy Device field values**, choosing the previous app's Device
+   field. Each ticket's Device is copied into this app's Device field. It is safe to run again.
+5. Re-enter the SOTI password (SOTI Sync), reload, and check Overview, Reports and a few tickets.
+6. Only then uninstall the previous app from the site (Manage apps), so only this app remains.
