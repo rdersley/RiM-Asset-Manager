@@ -15,13 +15,17 @@ const OPTIONS = [{ id: '10', value: 'Tablet' }, { id: '11', value: 'Printer' }];
 let issues = [];
 const calls = [];
 let refuse = new Set();
+// Rate limits: how many 429s each kind of call returns before succeeding.
+const limits = { search: 0, editmeta: 0 };
 const num = (key) => Number(key.split('-')[1]);
-const respond = (body, status = 200) => ({ ok: status < 300, status, json: async () => body, text: async () => JSON.stringify(body) });
+const respond = (body, status = 200) => ({ ok: status < 300, status, headers: { get: (h) => (status === 429 && h === 'Retry-After' ? '7' : null) }, json: async () => body, text: async () => JSON.stringify(body) });
 const issue = (n, deviceId, { type = null, status = '1' } = {}) => ({ id: String(n), key: `HW-${n}`, fields: { [DEVICE]: deviceId, [TYPE]: type, project: { id: '1', key: 'HW' }, issuetype: { id: '5' }, status: { id: status } } });
 mock.module('@forge/api', {
   defaultExport: { asApp: () => ({ requestJira: async (path, options = {}) => {
     const p = String(path); const method = options.method || 'GET';
     calls.push({ path: p, method, body: options.body ? JSON.parse(options.body) : null });
+    if (p === '/rest/api/3/search/jql' && limits.search > 0) { limits.search -= 1; return respond({}, 429); }
+    if (p.endsWith('/editmeta') && limits.editmeta > 0) { limits.editmeta -= 1; return respond({}, 429); }
     if (p === '/rest/api/3/search/jql') {
       const { jql, maxResults, nextPageToken } = JSON.parse(options.body);
       let list = issues.filter((i) => i.fields[DEVICE]);
@@ -45,7 +49,9 @@ mock.module('@forge/api', {
   } }) },
   namedExports: { route: (s, ...v) => s.reduce((o, x, i) => o + x + (v[i] ?? ''), '') }
 });
-const { backfillTicketTypesPage, backfillSearch } = await import('../src/ticket-type-backfill.js');
+const { backfillTicketTypesPage, backfillSearch, timing } = await import('../src/ticket-type-backfill.js');
+const waits = [];
+timing.wait = async (ms) => { waits.push(ms); };
 
 const nameKey = (name) => `asset-name:${Buffer.from(name.toLowerCase(), 'utf8').toString('base64url')}`;
 function device(id, name, type) { store.set(`asset:${id}`, { id, name, type }); store.set(nameKey(name), { assetId: id, name }); }
@@ -61,7 +67,7 @@ async function runAll(apply) {
 }
 
 beforeEach(() => {
-  store.clear(); calls.length = 0; refuse = new Set();
+  store.clear(); calls.length = 0; refuse = new Set(); limits.search = 0; limits.editmeta = 0; waits.length = 0;
   store.set('settings:asset-manager', { jiraAssetField: { id: DEVICE }, jiraTypeField: { id: TYPE }, jiraProjectKey: 'HW' });
   device('A1', 'TAB-0001', 'Tablet');
   device('A2', 'PRN-0002', 'Printer');
@@ -146,4 +152,34 @@ test('the search is scoped to the project and only empty types, and rejects a fo
 test('it needs both fields configured', async () => {
   store.set('settings:asset-manager', { jiraAssetField: { id: DEVICE } });
   await assert.rejects(backfillTicketTypesPage({}), /device type field/);
+});
+
+test('a brief Jira rate limit is waited out and the page carries on', async () => {
+  limits.search = 2;
+  const page = await backfillTicketTypesPage({ apply: false });
+  assert.equal(page.rateLimited, undefined);
+  assert.equal(page.filled, 2);
+  assert.equal(waits.length, 2);
+  assert.ok(waits.every((ms) => ms <= 8000), 'waits stay short enough for Forge');
+});
+
+test('a lasting rate limit hands the same page back, counting nothing', async () => {
+  limits.search = 99;
+  const page = await backfillTicketTypesPage({ cursor: { afterKey: 'HW-3' }, apply: true });
+  assert.equal(page.rateLimited, true);
+  assert.equal(page.retryAfterSeconds, 7);
+  assert.deepEqual(page.cursor, { afterKey: 'HW-3' });
+  assert.equal(page.checked, 0);
+  assert.equal(page.done, false);
+});
+
+test('a rate-limited editmeta is not mistaken for a field that cannot be edited', async () => {
+  limits.editmeta = 99;
+  const page = await backfillTicketTypesPage({ apply: false });
+  assert.equal(page.rateLimited, true);
+  assert.equal(page.notEditable, 0);
+  limits.editmeta = 0;
+  const t = await runAll(false);
+  assert.equal(t.notEditable, 1);
+  assert.equal(t.filled, 2);
 });

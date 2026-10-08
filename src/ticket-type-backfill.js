@@ -14,8 +14,19 @@ const SAMPLE_SIZE = 20;
 const clean = (value) => (typeof value === 'string' ? value.trim() : '');
 const fieldNumber = (id) => String(id).replace('customfield_', '');
 
+// Jira's rate limit (429): wait as asked, a couple of times, then give the page back to the UI
+// to retry later. Waits stay short so a page fits in Forge's time limit.
+export class RateLimited extends Error { constructor(retryAfter) { super('Jira rate limit'); this.retryAfter = retryAfter; } }
+export const timing = { wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
+const RETRIES = 2;
 async function jira(path, options = {}) {
-  return api.asApp().requestJira(path, { ...options, headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(options.headers || {}) } });
+  for (let attempt = 0; ; attempt += 1) {
+    const response = await api.asApp().requestJira(path, { ...options, headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...(options.headers || {}) } });
+    if (response.status !== 429) return response;
+    const retryAfter = Math.max(1, Math.min(Number(response.headers?.get?.('Retry-After')) || 2, 30));
+    if (attempt >= RETRIES) throw new RateLimited(retryAfter);
+    await timing.wait(Math.min(retryAfter, 4) * 1000 * (attempt + 1));
+  }
 }
 
 // The search. With a project, tickets with an empty type are read in key order from just after
@@ -36,6 +47,17 @@ export function backfillSearch(settings, cursor = {}) {
 const emptyTotals = () => ({ checked: 0, filled: 0, alreadySet: 0, noDeviceId: 0, multipleDevices: 0, notInRegister: 0, noType: 0, notAnOption: 0, notEditable: 0, failed: 0 });
 
 export async function backfillTicketTypesPage({ cursor = {}, apply = false } = {}) {
+  try {
+    return await backfillPage(cursor, apply);
+  } catch (error) {
+    // Nothing from this page is counted; the same page is read again, which is safe: filled
+    // tickets no longer match (or count as already set), and a preview writes nothing.
+    if (error instanceof RateLimited) return { apply, ...emptyTotals(), rateLimited: true, retryAfterSeconds: error.retryAfter, byType: {}, notAnOptionTypes: {}, notInRegisterSample: [], fillSample: [], failures: [], cursor, done: false };
+    throw error;
+  }
+}
+
+async function backfillPage(cursor, apply) {
   const settings = (await kvs.get(SETTINGS_KEY)) || {};
   const deviceFieldId = clean(settings.jiraAssetField?.id);
   const typeFieldId = clean(settings.jiraTypeField?.id);
@@ -55,7 +77,7 @@ export async function backfillTicketTypesPage({ cursor = {}, apply = false } = {
   const metaCache = new Map();
   const typeFieldDef = (issue) => {
     const key = [issue.fields?.project?.id, issue.fields?.issuetype?.id, issue.fields?.status?.id].join('|');
-    if (!metaCache.has(key)) metaCache.set(key, jira(route`/rest/api/3/issue/${issue.key}/editmeta`).then(async (r) => (r.ok ? (await r.json()).fields?.[typeFieldId] || null : null)).catch(() => null));
+    if (!metaCache.has(key)) metaCache.set(key, jira(route`/rest/api/3/issue/${issue.key}/editmeta`).then(async (r) => (r.ok ? (await r.json()).fields?.[typeFieldId] || null : null)).catch((e) => { if (e instanceof RateLimited) throw e; return null; }));
     return metaCache.get(key);
   };
 
@@ -88,8 +110,8 @@ export async function backfillTicketTypesPage({ cursor = {}, apply = false } = {
     if (fillSample.length < SAMPLE_SIZE) fillSample.push({ key: issue.key, deviceId: ids[0], type });
   };
 
-  let next = 0;
-  const worker = async () => { while (next < issues.length) await handle(issues[next++]); };
+  let next = 0; let halted = false;
+  const worker = async () => { while (next < issues.length && !halted) { try { await handle(issues[next++]); } catch (e) { halted = true; throw e; } } };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, issues.length) }, worker));
 
   const done = projectKey ? issues.length < PAGE_SIZE : !page?.nextPageToken;
