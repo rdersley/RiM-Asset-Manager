@@ -18,13 +18,13 @@ import { recordTicketRejection } from './device-id-review.js';
 //   replacement device recorded on the ticket, creating that device if it is not registered.
 // Anything ambiguous is skipped and logged rather than guessed.
 
-const SETTINGS_KEY = 'settings:asset-manager';
+export const SETTINGS_KEY = 'settings:asset-manager';
 const ASSET_PREFIX = 'asset:';
 const ASSET_NAME_PREFIX = 'asset-name:';
 const HISTORY_PREFIX = 'asset-history:';
 
 const clean = (value) => (typeof value === 'string' ? value.trim() : '');
-const normaliseName = (value) => clean(String(value ?? '')).toLocaleLowerCase('en').replace(/\s+/g, ' ');
+export const normaliseName = (value) => clean(String(value ?? '')).toLocaleLowerCase('en').replace(/\s+/g, ' ');
 // Keys must match src/index.js (makeJiraAssetId, nameIndexKey).
 const jiraAssetId = (fieldId, identifier) => `AST-JIRA-${createHash('sha256').update(`${fieldId}:${normaliseName(identifier)}`).digest('hex').slice(0, 24).toUpperCase()}`;
 const nameIndexKey = (name) => `${ASSET_NAME_PREFIX}${Buffer.from(normaliseName(name), 'utf8').toString('base64url')}`;
@@ -40,14 +40,14 @@ function fieldValues(value) {
 // Same placeholder rules as Jira discovery: no "N/A", "0000", numbers-only or 3-character values.
 const validIdentifier = (raw) => raw.length >= 4 && raw.length <= 100 && /[a-z]/i.test(raw) && !['n/a', 'none', 'null', 'unknown'].includes(raw.toLowerCase());
 // Device IDs in a field, as typed ("RYRS506641"); "A | B" counts as two.
-const identifiersIn = (value) => {
+export const identifiersIn = (value) => {
   const seen = new Map();
   for (const id of fieldValues(value).flatMap((v) => v.split(/\s*[|,;]\s*/)).map((v) => v.trim()).filter(validIdentifier)) if (!seen.has(normaliseName(id))) seen.set(normaliseName(id), id);
   return [...seen.values()];
 };
-const firstValue = (value) => fieldValues(value)[0] || '';
+export const firstValue = (value) => fieldValues(value)[0] || '';
 
-async function findDevice(fieldId, identifier) {
+export async function findDevice(fieldId, identifier) {
   if (fieldId) { const byJiraId = await kvs.get(`${ASSET_PREFIX}${jiraAssetId(fieldId, identifier)}`); if (byJiraId) return byJiraId; }
   const indexed = await kvs.get(nameIndexKey(identifier));
   return indexed?.assetId ? (await kvs.get(`${ASSET_PREFIX}${indexed.assetId}`)) || null : null;
@@ -153,7 +153,7 @@ async function checkDeviceIdOnSave(event, issueKey) {
 
 // The Jira value for a type in the Device type field: the matching option on a select field
 // (Jira's spelling), the text on a text field, or null when the field has no such option.
-function typeFieldValue(def, type) {
+export function typeFieldValue(def, type) {
   const key = normaliseName(type);
   if (Array.isArray(def.allowedValues)) {
     const option = def.allowedValues.find((o) => normaliseName(o?.value ?? o?.name) === key);

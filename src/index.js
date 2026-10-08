@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { guardResolver } from './auth.js';
 import { defineBackupResolvers, BACKUP_RESOLVERS } from './backup.js';
 import { deviceFields, copyDeviceFieldPage } from './device-field-copy.js';
+import { backfillTicketTypesPage } from './ticket-type-backfill.js';
 import { normaliseReplacementSettings, normaliseStatusRules, STATUS_AUTOMATION_LOG_KEY } from './status-automation.js';
 import { licensedResolver } from './licence.js';
 import { trackActor, actorFields } from './actor.js';
@@ -14,11 +15,12 @@ import { buildDeviceTimeline, bulkCandidate, dateOnly } from './device-timeline.
 
 // Actions that change configuration, run Jira discovery or write many assets
 // at once. Everyday create/edit and guarded single delete stay open to users.
-const ADMIN_RESOLVERS = new Set([...BACKUP_RESOLVERS, 'getDeviceFieldsForCopy', 'copyDeviceFieldPage', 'saveSettings', 'syncAssetsFromJira', 'bulkImportAssets', 'previewAssetImportReconciliation', 'reconcileAssetImport', 'bulkRemoveAssets', 'getStatusAutomationLog', 'getDataConflicts', 'resolveDataConflict', 'tidyAssetTypes', 'previewJiraScan', 'getDeviceIdReview', 'resolveDeviceIdValue', 'bulkHolderConflicts']);
+const ADMIN_RESOLVERS = new Set([...BACKUP_RESOLVERS, 'getDeviceFieldsForCopy', 'copyDeviceFieldPage', 'backfillTicketTypesPage', 'saveSettings', 'syncAssetsFromJira', 'bulkImportAssets', 'previewAssetImportReconciliation', 'reconcileAssetImport', 'bulkRemoveAssets', 'getStatusAutomationLog', 'getDataConflicts', 'resolveDataConflict', 'tidyAssetTypes', 'previewJiraScan', 'getDeviceIdReview', 'resolveDeviceIdValue', 'bulkHolderConflicts']);
 const resolver = trackActor(guardResolver(licensedResolver(new Resolver()), ADMIN_RESOLVERS));
 defineBackupResolvers(resolver);
 resolver.define('getDeviceFieldsForCopy', async () => deviceFields());
 resolver.define('copyDeviceFieldPage', async ({ payload }) => copyDeviceFieldPage(payload || {}));
+resolver.define('backfillTicketTypesPage', async ({ payload }) => backfillTicketTypesPage({ cursor: payload?.cursor || {}, apply: payload?.apply === true }));
 const BULK_REMOVE_BATCH = 25;
 const JIRA_DISCOVERED_NOTE = 'Discovered automatically from Jira field';
 // Jira-discovered and never confirmed by a person (edit, import or CSV merge).
