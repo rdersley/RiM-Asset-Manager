@@ -16,24 +16,47 @@ const LABELS = [
 const NUMBERS = LABELS.map(([key]) => key).concat('checked');
 const addCounts = (into, from) => { for (const [k, v] of Object.entries(from || {})) into[k] = (into[k] || 0) + v; };
 const addSample = (into, from) => into.concat(from || []).slice(0, 20);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Jira rate limits: wait this long (or longer if Jira asks), up to this many times in a row.
+const RATE_LIMIT_WAIT_SECONDS = 15;
+const RATE_LIMIT_TRIES = 20;
 
 export default function TicketTypeBackfill({ invoke }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [previewed, setPreviewed] = useState(false);
   const [error, setError] = useState('');
+  const [waiting, setWaiting] = useState('');
   const stop = useRef(false);
+  // Where a stopped run got to, so Continue carries on from there with the same totals.
+  const resume = useRef(null);
 
-  const run = async (apply) => {
-    if (apply && !window.confirm('Fill the device type on the tickets counted in the preview? Each ticket is updated by Asset Manager without email notifications. Its Updated date changes, and Jira Automation rules that react to field changes may run.')) return;
-    setBusy(true); setError(''); stop.current = false;
-    const totals = { apply, checked: 0, byType: {}, notAnOptionTypes: {}, notInRegisterSample: [], fillSample: [], failures: [], done: false };
-    for (const key of NUMBERS) totals[key] = 0;
+  const run = async (apply, carryOn = false) => {
+    if (apply && !carryOn && !window.confirm('Fill the device type on the tickets counted in the preview? Each ticket is updated by Asset Manager without email notifications. Its Updated date changes, and Jira Automation rules that react to field changes may run.')) return;
+    setBusy(true); setError(''); setWaiting(''); stop.current = false;
+    let totals;
+    let cursor = {};
+    if (carryOn && resume.current) ({ totals, cursor } = resume.current);
+    else {
+      totals = { apply, checked: 0, byType: {}, notAnOptionTypes: {}, notInRegisterSample: [], fillSample: [], failures: [], done: false };
+      for (const key of NUMBERS) totals[key] = 0;
+    }
+    resume.current = null;
     setResult({ ...totals });
+    let limited = 0;
     try {
-      let cursor = {};
       while (cursor && !stop.current) {
         const page = await invoke('backfillTicketTypesPage', { cursor, apply });
+        if (page?.rateLimited) {
+          limited += 1;
+          if (limited > RATE_LIMIT_TRIES) throw new Error('Jira kept asking Asset Manager to slow down. Select Continue later to carry on from here.');
+          const seconds = Math.max(RATE_LIMIT_WAIT_SECONDS, Number(page.retryAfterSeconds) || 0);
+          setWaiting(`Jira asked Asset Manager to slow down. Waiting ${seconds} seconds, then carrying on…`);
+          await sleep(seconds * 1000);
+          setWaiting('');
+          continue;
+        }
+        limited = 0;
         for (const key of NUMBERS) totals[key] += page?.[key] || 0;
         addCounts(totals.byType, page?.byType); addCounts(totals.notAnOptionTypes, page?.notAnOptionTypes);
         totals.notInRegisterSample = addSample(totals.notInRegisterSample, page?.notInRegisterSample);
@@ -45,8 +68,10 @@ export default function TicketTypeBackfill({ invoke }) {
       }
       if (!apply && totals.done) setPreviewed(true);
     } catch (e) {
-      setError(`${e?.message || e} Running it again is safe: tickets that already have a type are skipped.`);
+      setError(`${e?.message || e} Select Continue to carry on from where it stopped.`);
     } finally {
+      if (cursor) resume.current = { apply, cursor, totals };
+      setWaiting('');
       setBusy(false);
     }
   };
@@ -59,6 +84,7 @@ export default function TicketTypeBackfill({ invoke }) {
     <div className="actions" style={{ justifyContent: 'flex-start' }}>
       <button className="secondary" disabled={busy} onClick={() => run(false)}>{busy && !r?.apply ? 'Previewing…' : 'Preview'}</button>
       <button className="primary" disabled={busy || !previewed || !(r && !r.apply ? r.filled : true)} onClick={() => run(true)}>{busy && r?.apply ? 'Filling…' : 'Fill device types'}</button>
+      {!busy && resume.current && <button className="secondary" onClick={() => run(resume.current.apply, true)}>Continue {resume.current.apply ? 'fill' : 'preview'}</button>}
       {busy && <button className="secondary" onClick={() => { stop.current = true; }}>Stop</button>}
     </div>
     {r && <div style={{ marginTop: 12 }}>
@@ -72,6 +98,7 @@ export default function TicketTypeBackfill({ invoke }) {
       {r.notInRegisterSample.length > 0 && <p><small>Device IDs not in the register, for example: {r.notInRegisterSample.slice(0, 10).map((x) => `${x.key} (${x.deviceId})`).join(', ')}</small></p>}
       {r.failures.length > 0 && <p><small>Refused by Jira: {r.failures.slice(0, 5).map((x) => `${x.key}: ${x.error}`).join('; ')}</small></p>}
     </div>}
+    {waiting && <p role="status" className="notice">{waiting}</p>}
     {error && <p role="alert" className="notice">{error}</p>}
   </div>;
 }
