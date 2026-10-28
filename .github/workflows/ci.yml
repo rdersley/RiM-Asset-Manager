@@ -41,6 +41,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          check-latest: true
       - name: Install backend dependencies
         run: npm install --ignore-scripts
       - name: Install Asset Manager UI dependencies
@@ -134,6 +135,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          check-latest: true
       - name: Install backend dependencies
         run: npm install --ignore-scripts
       - name: Download UI builds from validate
@@ -177,6 +179,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          check-latest: true
       - name: Browser QA configuration notice
         if: env.PLAYWRIGHT_STORAGE_STATE_B64 == ''
         run: echo "::warning::Authenticated browser QA is ready but PLAYWRIGHT_STORAGE_STATE_B64 is not configured yet."
